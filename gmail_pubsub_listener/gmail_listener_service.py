@@ -10,6 +10,7 @@ import json
 import time
 import os
 import logging
+import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from google.cloud import pubsub_v1
@@ -38,6 +39,11 @@ class GmailPubSubListener:
         self.project_id = PROJECT_ID
         self.subscription_name = SUBSCRIPTION_NAME
         self.sales_email = SALES_EMAIL
+        self.adk_agent_endpoint = os.getenv("ADK_AGENT_ENDPOINT")
+        self.adk_agent_auth_token = os.getenv("ADK_AGENT_AUTH_TOKEN")
+
+        if not self.adk_agent_endpoint:
+            logger.warning("⚠️ ADK_AGENT_ENDPOINT is not set. ADK Agent triggering will be disabled.")
         
         # Initialize Pub/Sub subscriber
         self.subscriber = pubsub_v1.SubscriberClient()
@@ -174,10 +180,13 @@ class GmailPubSubListener:
     
     def trigger_adk_agent(self, message_id, sender, subject, full_message):
         """Trigger your ADK Agent via A2A"""
-        logger.info(f"🤖 Triggering ADK Agent for message {message_id}")
-        
-        # TODO: Replace this with your actual ADK Agent A2A call
-        # Example data you might send:
+        if not self.adk_agent_endpoint:
+            logger.warning(f"🤖 ADK Agent endpoint not configured. Skipping trigger for message {message_id}")
+            return
+
+        logger.info(f"🤖 Triggering ADK Agent for message {message_id} to {self.adk_agent_endpoint}")
+
+        # Enhanced payload including full message details
         agent_payload = {
             "event_type": "new_email",
             "email_data": {
@@ -185,24 +194,41 @@ class GmailPubSubListener:
                 "sender": sender,
                 "subject": subject,
                 "timestamp": datetime.now().isoformat(),
-                "sales_email": self.sales_email
-            }
+                "sales_email": self.sales_email,
+                "snippet": full_message.get('snippet'),
+                "history_id": full_message.get('historyId'),
+                "internal_date": full_message.get('internalDate'),
+                "payload_headers": full_message.get('payload', {}).get('headers', [])
+            },
+            "source_system": "gmail_pubsub_listener"
         }
-        
-        # Example A2A call (replace with your actual implementation):
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if self.adk_agent_auth_token:
+            headers["Authorization"] = f"Bearer {self.adk_agent_auth_token}"
+
         try:
-            # import requests
-            # response = requests.post(
-            #     "YOUR_ADK_AGENT_ENDPOINT",
-            #     json=agent_payload,
-            #     headers={"Authorization": "Bearer YOUR_TOKEN"}
-            # )
-            # logger.info(f"✅ ADK Agent triggered: {response.status_code}")
-            
-            logger.info(f"📤 Would trigger ADK Agent with: {agent_payload}")
-            
+            response = requests.post(
+                self.adk_agent_endpoint,
+                json=agent_payload,
+                headers=headers,
+                timeout=30  # Adding a timeout for the request
+            )
+            response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+            logger.info(f"✅ ADK Agent triggered successfully: {response.status_code} - {response.text}")
+
+        except requests.exceptions.HTTPError as http_err:
+            logger.error(f"❌ HTTP error triggering ADK Agent: {http_err} - {response.text}")
+        except requests.exceptions.ConnectionError as conn_err:
+            logger.error(f"❌ Connection error triggering ADK Agent: {conn_err}")
+        except requests.exceptions.Timeout as timeout_err:
+            logger.error(f"❌ Timeout error triggering ADK Agent: {timeout_err}")
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"❌ Failed to trigger ADK Agent: {req_err}")
         except Exception as e:
-            logger.error(f"❌ Failed to trigger ADK Agent: {e}")
+            logger.error(f"❌ An unexpected error occurred while triggering ADK Agent: {e}")
     
     def message_callback(self, message):
         """Callback for processing Pub/Sub messages"""
